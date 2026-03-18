@@ -1,0 +1,11 @@
+GroupName,GroupSeqNo,RegisterName,Label,Category,RegisterType,AddressStart,Length,AccessType,DataType,SubDataType,ByteOrder,WordOrder,Scale,Unit,EnumMap,BitMap,Constraints,Execution
+mainstatus,1,reg_id_1,Test Register 1,2,2,40001,1,2,2,2,2,,0.1,kW,0=Off;1=On;2=Standby,,,
+DETAILEDTELEMETRY,2,reg_id_2,Test Register 2,3,3,40002,1,3,3,3,1,,0.1,kW,,0=Err:critical|1=Warn:warning,min=0;max=1000;step=1,
+faultlog,3,reg_id_3,Test Register 3,1,4,40003,1,1,4,1,2,,0.1,kW,,,,
+SETTINGS,4,reg_id_4,Test Register 4,2,1,40004,2,2,5,2,1,1,0.1,kW,0=Off;1=On;2=Standby,,,
+commands,5,reg_id_5,Test Register 5,3,2,40005,2,3,6,3,2,2,0.1,kW,,0=Err:critical|1=Warn:warning,min=0;max=1000;step=1,1:true
+MAINSTATUS,1,reg_id_6,Test Register 6,1,3,40006,2,1,7,1,1,1,0.1,kW,,,,
+detailedtelemetry,2,reg_id_7,Test Register 7,2,4,40007,1,2,8,2,2,,0.1,kW,0=Off;1=On;2=Standby,,,
+FAULTLOG,3,reg_id_8,Test Register 8,3,1,40008,1,3,1,3,1,,0.1,kW,,0=Err:critical|1=Warn:warning,min=0;max=1000;step=1,
+settings,4,reg_id_9,Test Register 9,1,2,40009,1,1,2,1,2,,0.1,kW,,,,
+COMMANDS,5,reg_id_10,Test Register 10,2,3,40010,1,2,3,2,1,,0.1,kW,0=Off;1=On;2=Standby,,,1:true

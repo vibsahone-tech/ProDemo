@@ -1,0 +1,18 @@
+{
+    "DataStore": {
+    
+        "URL": "mongodb://localhost:27017",
+        "DB": "chariot",
+        "RegisterCollection": "registers",
+        "ProtocolCollection": "protocols",
+        "TimeoutSec": 60,
+        "TransactionTimeoutSec": 30
+    },
+    "Server": {
+        "Port": "8080",
+        "MaxUploadSizeMB": 1
+    },
+    "Upload": {
+        "MaxRows": 2000
+    }
+}
