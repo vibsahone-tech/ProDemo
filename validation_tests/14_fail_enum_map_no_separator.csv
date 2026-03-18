@@ -1,0 +1,2 @@
+GroupName,GroupSeqNo,RegisterName,Label,Category,RegisterType,AddressStart,Length,AccessType,DataType,SubDataType,ByteOrder,WordOrder,Scale,Unit,EnumMap,BitMap,Constraints,Execution
+Main,1,reg1,Bad EnumMap,1,1,40001,1,1,3,2,1,0,1,V,0 Off;1=On,,,

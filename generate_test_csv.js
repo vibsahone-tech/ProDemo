@@ -73,8 +73,8 @@ for (let i = 1; i <= numRows; i++) {
     }
     
     let execution = "";
-    // Rule: Execution is now allowed for any category. Let's add it periodically.
-    if (i % 5 === 0) {
+    // Rule: Execution is only allowed for non-ReadOnly registers (2=Write, 3=ReadWrite)
+    if (i % 5 === 0 && accessType !== 1) {
         execution = "1:true";
     }
 
@@ -94,9 +94,10 @@ for (let i = 1; i <= numRows; i++) {
         wordOrder,
         scale,
         unit,
-        enumMap,
-        bitMap,
-        constraints,
+        // Wrap fields that might contain commas in quotes
+        enumMap.includes(';') ? `"${enumMap}"` : enumMap,
+        bitMap.includes('|') ? `"${bitMap}"` : bitMap,
+        constraints.includes(';') ? `"${constraints}"` : constraints,
         execution
     ].join(",");
 

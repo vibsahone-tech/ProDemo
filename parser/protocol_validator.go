@@ -66,7 +66,8 @@ func ParseProtocolForm(r *http.Request) (model.Protocol, []string) {
 
 	// Parse error_codes: key-value pairs sent as "code=label" separated by ";".
 	// e.g. "1=Illegal Function;2=Illegal Data Address;3=Illegal Data Value"
-	errorCodes := parseErrorCodes(r.FormValue("error_codes"))
+	errorCodes, errCodeErrs := parseErrorCodes(r.FormValue("error_codes"))
+	errs = append(errs, errCodeErrs...)
 
 	proto := model.Protocol{
 		ID:           bson.NewObjectID(),
@@ -89,28 +90,53 @@ func ParseProtocolForm(r *http.Request) (model.Protocol, []string) {
 }
 
 // parseErrorCodes parses "code=label;code=label;..." into []ErrorCode.
-func parseErrorCodes(raw string) []model.ErrorCode {
+// It also returns a list of validation errors for any malformed items,
+// telling the caller what went wrong and showing the expected format.
+func parseErrorCodes(raw string) ([]model.ErrorCode, []string) {
+	const correctFormat = `correct format: "<int>=<label>;<int>=<label>;..." e.g. "1=Illegal Function;2=Illegal Data Address;3=Illegal Data Value"`
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	items := strings.Split(raw, ";")
 	result := make([]model.ErrorCode, 0, len(items))
+	var errs []string
 	for _, item := range items {
-		codeStr, label, ok := strings.Cut(item, "=")
-		if !ok {
+		item = strings.TrimSpace(item)
+		if item == "" {
 			continue
 		}
-		code, err := strconv.Atoi(strings.TrimSpace(codeStr))
+		codeStr, label, ok := strings.Cut(item, "=")
+		if !ok {
+			errs = append(errs, fmt.Sprintf(
+				`error_codes: item %q is missing "=" separator; %s`,
+				item, correctFormat,
+			))
+			continue
+		}
+		codeStr = strings.TrimSpace(codeStr)
+		label = strings.TrimSpace(label)
+		code, err := strconv.Atoi(codeStr)
 		if err != nil {
+			errs = append(errs, fmt.Sprintf(
+				`error_codes: code %q in item %q must be an integer; %s`,
+				codeStr, item, correctFormat,
+			))
+			continue
+		}
+		if label == "" {
+			errs = append(errs, fmt.Sprintf(
+				`error_codes: label is empty for code %d; %s`,
+				code, correctFormat,
+			))
 			continue
 		}
 		result = append(result, model.ErrorCode{
 			Code:  code,
-			Label: strings.TrimSpace(label),
+			Label: label,
 		})
 	}
-	return result
+	return result, errs
 }
 
 // formInt reads an integer from a form field. If mandatory and missing/invalid, appends an error.

@@ -67,10 +67,13 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 		}
 
 		record := buildRowMap(headers, row)
-		reg := buildRegister(record)
+		reg, fmtErrs := buildRegister(record)
 
-		if errs := validateRegister(rowNum, reg, seenNames); len(errs) > 0 {
-			parseErrs = append(parseErrs, ParseError{Row: rowNum, Errors: errs})
+		// Merge format-parse errors with field-level validation errors.
+		validErrs := validateRegister(rowNum, reg, seenNames)
+		allErrs := append(fmtErrs, validErrs...)
+		if len(allErrs) > 0 {
+			parseErrs = append(parseErrs, ParseError{Row: rowNum, Errors: allErrs})
 			continue // skip invalid rows
 		}
 
@@ -107,8 +110,9 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 }
 
 // buildRegister constructs a Register from a CSV row map.
-// No validation is done here; that is handled by validateRegister.
-func buildRegister(row map[string]string) model.Register {
+// It returns the Register and any format-level errors from complex field parsing.
+// Field-level semantic validation is handled separately by validateRegister.
+func buildRegister(row map[string]string) (model.Register, []string) {
 	reg := model.Register{
 		ID:           bson.NewObjectID(),
 		Name:         row["RegisterName"],
@@ -128,124 +132,191 @@ func buildRegister(row map[string]string) model.Register {
 	reg.ByteOrder = model.ByteOrder(atoi(row["ByteOrder"]))
 	reg.WordOrder = model.WordOrder(atoi(row["WordOrder"]))
 
-	reg.EnumMap = parseEnumMap(row["EnumMap"])
-	reg.BitMap = parseBitMap(row["BitMap"])
+	var fmtErrs []string
 
-	if c := parseConstraints(row["Constraints"]); !c.IsZero() {
+	enumMap, errs := parseEnumMap(row["EnumMap"])
+	reg.EnumMap = enumMap
+	fmtErrs = append(fmtErrs, errs...)
+
+	bitMap, errs := parseBitMap(row["BitMap"])
+	reg.BitMap = bitMap
+	fmtErrs = append(fmtErrs, errs...)
+
+	c, errs := parseConstraints(row["Constraints"])
+	if !c.IsZero() {
 		reg.Constraints = c
 	}
+	fmtErrs = append(fmtErrs, errs...)
 
-	if e := parseExecution(row["Execution"]); !e.IsZero() {
+	e, errs := parseExecution(row["Execution"])
+	if !e.IsZero() {
 		reg.Execution = e
 	}
+	fmtErrs = append(fmtErrs, errs...)
 
-	return reg
+	return reg, fmtErrs
 }
 
 // ── Complex field parsers ───────────────────────────────────────────────────
 
 // parseEnumMap parses "value=label;value=label;..." into []EnumMapping.
-func parseEnumMap(raw string) []model.EnumMapping {
+// Returns both the parsed result and any format errors encountered.
+func parseEnumMap(raw string) ([]model.EnumMapping, []string) {
+	const correctFormat = `correct format: "<int>=<label>;<int>=<label>;..." e.g. "0=Off;1=On;2=Standby"`
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	items := strings.Split(raw, ";")
 	result := make([]model.EnumMapping, 0, len(items))
+	var errs []string
 	for _, item := range items {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
 		key, label, ok := strings.Cut(item, "=")
 		if !ok {
+			errs = append(errs, fmt.Sprintf(`EnumMap: item %q is missing "=" separator; %s`, item, correctFormat))
 			continue
 		}
-		v, err := strconv.Atoi(strings.TrimSpace(key))
+		key = strings.TrimSpace(key)
+		label = strings.TrimSpace(label)
+		v, err := strconv.Atoi(key)
 		if err != nil {
+			errs = append(errs, fmt.Sprintf(`EnumMap: value %q in item %q must be an integer; %s`, key, item, correctFormat))
 			continue
 		}
-		result = append(result, model.EnumMapping{
-			Value: v,
-			Label: strings.TrimSpace(label),
-		})
+		if label == "" {
+			errs = append(errs, fmt.Sprintf(`EnumMap: label is empty for value %d; %s`, v, correctFormat))
+			continue
+		}
+		result = append(result, model.EnumMapping{Value: v, Label: label})
 	}
-	return result
+	return result, errs
 }
 
 // parseBitMap parses "bit=label:severity|..." into []BitMapping.
-func parseBitMap(raw string) []model.BitMapping {
+// Returns both the parsed result and any format errors encountered.
+func parseBitMap(raw string) ([]model.BitMapping, []string) {
+	const correctFormat = `correct format: "<bit>=<label>:<severity>|..." e.g. "0=Alarm:critical|1=Warning:warning|2=Info:info" (severity: info/warning/critical, optional)`
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	items := strings.Split(raw, "|")
 	result := make([]model.BitMapping, 0, len(items))
+	var errs []string
 	for _, item := range items {
-		bitStr, rest, ok := strings.Cut(item, "=")
-		if !ok {
+		item = strings.TrimSpace(item)
+		if item == "" {
 			continue
 		}
-		bit, err := strconv.Atoi(strings.TrimSpace(bitStr))
+		bitStr, rest, ok := strings.Cut(item, "=")
+		if !ok {
+			errs = append(errs, fmt.Sprintf(`BitMap: item %q is missing "=" separator; %s`, item, correctFormat))
+			continue
+		}
+		bitStr = strings.TrimSpace(bitStr)
+		bit, err := strconv.Atoi(bitStr)
 		if err != nil {
+			errs = append(errs, fmt.Sprintf(`BitMap: bit position %q in item %q must be an integer; %s`, bitStr, item, correctFormat))
 			continue
 		}
 		m := model.BitMapping{Bit: bit}
 		label, severity, hasSeverity := strings.Cut(rest, ":")
 		m.Label = strings.TrimSpace(label)
+		if m.Label == "" {
+			errs = append(errs, fmt.Sprintf(`BitMap: label is empty for bit %d; %s`, bit, correctFormat))
+			continue
+		}
 		if hasSeverity {
-			switch strings.ToLower(strings.TrimSpace(severity)) {
+			sev := strings.ToLower(strings.TrimSpace(severity))
+			switch sev {
 			case "info":
 				m.Severity = model.BitSeverityInfo
 			case "warning":
 				m.Severity = model.BitSeverityWarning
 			case "critical":
 				m.Severity = model.BitSeverityCritical
+			default:
+				errs = append(errs, fmt.Sprintf(`BitMap: unknown severity %q for bit %d (valid: info/warning/critical); %s`, sev, bit, correctFormat))
+				continue
 			}
 		}
 		result = append(result, m)
 	}
-	return result
+	return result, errs
 }
 
 // parseConstraints parses "min=N;max=N;step=N" into Constraints.
-func parseConstraints(raw string) model.Constraints {
+// Returns both the parsed result and any format errors encountered.
+func parseConstraints(raw string) (model.Constraints, []string) {
+	const correctFormat = `correct format: "min=<number>;max=<number>;step=<number>" e.g. "min=0;max=100;step=1"`
 	if raw == "" {
-		return model.Constraints{}
+		return model.Constraints{}, nil
 	}
 	var c model.Constraints
+	var errs []string
 	for _, item := range strings.Split(raw, ";") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
 		key, valStr, ok := strings.Cut(item, "=")
 		if !ok {
+			errs = append(errs, fmt.Sprintf(`Constraints: item %q is missing "=" separator; %s`, item, correctFormat))
 			continue
 		}
-		val, err := strconv.ParseFloat(strings.TrimSpace(valStr), 64)
+		key = strings.ToLower(strings.TrimSpace(key))
+		valStr = strings.TrimSpace(valStr)
+		val, err := strconv.ParseFloat(valStr, 64)
 		if err != nil {
+			errs = append(errs, fmt.Sprintf(`Constraints: value %q for key %q must be a number; %s`, valStr, key, correctFormat))
 			continue
 		}
-		switch strings.ToLower(strings.TrimSpace(key)) {
+		switch key {
 		case "min":
 			c.Min = val
 		case "max":
 			c.Max = val
 		case "step":
 			c.Step = val
+		default:
+			errs = append(errs, fmt.Sprintf(`Constraints: unknown key %q (valid keys: min/max/step); %s`, key, correctFormat))
 		}
 	}
-	return c
+	return c, errs
 }
 
 // parseExecution parses "triggerValue:autoReset" (e.g. "1:true") into ExecutionConfig.
-func parseExecution(raw string) model.ExecutionConfig {
+// Returns both the parsed result and any format errors encountered.
+func parseExecution(raw string) (model.ExecutionConfig, []string) {
+	const correctFormat = `correct format: "<int>:<bool>" e.g. "1:true" or "1:false"`
 	if raw == "" {
-		return model.ExecutionConfig{}
+		return model.ExecutionConfig{}, nil
 	}
 	valStr, resetStr, ok := strings.Cut(raw, ":")
 	if !ok {
-		return model.ExecutionConfig{}
+		return model.ExecutionConfig{}, []string{
+			fmt.Sprintf(`Execution: %q is missing ":" separator; %s`, raw, correctFormat),
+		}
 	}
-	val, err := strconv.Atoi(strings.TrimSpace(valStr))
+	valStr = strings.TrimSpace(valStr)
+	resetStr = strings.TrimSpace(resetStr)
+	val, err := strconv.Atoi(valStr)
 	if err != nil {
-		return model.ExecutionConfig{}
+		return model.ExecutionConfig{}, []string{
+			fmt.Sprintf(`Execution: trigger value %q must be an integer; %s`, valStr, correctFormat),
+		}
+	}
+	if resetStr != "true" && resetStr != "false" {
+		return model.ExecutionConfig{}, []string{
+			fmt.Sprintf(`Execution: autoReset %q must be "true" or "false"; %s`, resetStr, correctFormat),
+		}
 	}
 	return model.ExecutionConfig{
 		TriggerValue: val,
-		AutoReset:    strings.TrimSpace(resetStr) == "true",
-	}
+		AutoReset:    resetStr == "true",
+	}, nil
 }
 
 // ── Header / row helpers ────────────────────────────────────────────────────
