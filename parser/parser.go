@@ -64,7 +64,7 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 	}
 	var missing []string
 	required := []string{
-		"RegisterName", "Label", "SeqNo", "Category", "RegisterType",
+		"RegisterName", "Label", "Category", "RegisterType",
 		"AddressStart", "Length", "AccessType", "DataType", "SubDataType",
 		"GroupName", "GroupSeqNo",
 	}
@@ -115,15 +115,12 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 			continue
 		}
 
-		registers = append(registers, reg)
-
-		// 4. Groups - Group individual registers into named sets (RegisterGroups)
+		// 4. Groups and Sequence Assignment
 		groupName := record["groupname"]
 		if groupName != "" {
-			// Normalize group name to lowercase for case-insensitive duplicate checking
 			normalizedGroupName := strings.ToLower(groupName)
 
-			// Extract and validate the Group's sequence number which order the groups
+			// Initialize group if new
 			var groupSeqNo int
 			if s := record["groupseqno"]; s != "" {
 				if v, err := strconv.Atoi(s); err != nil {
@@ -137,10 +134,7 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 				}
 			}
 
-			// Check if this group was already encountered in a previous row
 			if g, ok := groupMap[normalizedGroupName]; ok {
-				// Safety Check: If the group exists, it MUST have the same SeqNo.
-				// We don't allow the same GroupName to have different SeqNos across rows.
 				if g.SeqNo != groupSeqNo {
 					parseErrs = append(parseErrs, ParseError{
 						Row: rowNum,
@@ -152,16 +146,20 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 					continue
 				}
 			} else {
-				// First time seeing this group: initialize a new RegisterGroup object
 				groupMap[normalizedGroupName] = &model.RegisterGroup{
 					Name:  groupName,
 					SeqNo: groupSeqNo,
 				}
 			}
 
-			// Link this specific register (by ID) to its parent group
+			// AUTO-GENERATE SEQNO: Use the current count of registers in this group + 1
+			reg.SeqNo = len(groupMap[normalizedGroupName].RegisterIds) + 1
+
+			// Link register to group
 			groupMap[normalizedGroupName].RegisterIds = append(groupMap[normalizedGroupName].RegisterIds, reg.ID)
 		}
+
+		registers = append(registers, reg)
 	}
 
 	groups := make([]model.RegisterGroup, 0, len(groupMap))
@@ -199,21 +197,7 @@ func buildRegister(row map[string]string, seenNames map[string]bool) (model.Regi
 		errs = append(errs, fmt.Sprintf("Label: exceeds %d characters", maxStrLen))
 	}
 
-	// 3. SeqNo - mandatory, positive integer
-	var seqNo int
-	if s := row["seqno"]; s != "" {
-		if v, err := strconv.Atoi(s); err != nil {
-			errs = append(errs, fmt.Sprintf("SeqNo: invalid integer format %q", s))
-		} else if v <= 0 {
-			errs = append(errs, "SeqNo: must be positive")
-		} else {
-			seqNo = v
-		}
-	} else {
-		errs = append(errs, "SeqNo: mandatory field is missing")
-	}
-
-	// 4. Category - mandatory, enum range check
+	// 3. Category - mandatory, enum range check
 	var category int
 	if s := row["category"]; s != "" {
 		if v, err := strconv.Atoi(s); err != nil {
@@ -413,7 +397,6 @@ func buildRegister(row map[string]string, seenNames map[string]bool) (model.Regi
 		ID:           bson.NewObjectID(),
 		Name:         name,
 		Label:        label,
-		SeqNo:        seqNo,
 		Category:     model.RegisterCategory(category),
 		RegisterType: model.RegisterType(regType),
 		AddressStart: addrStart,
