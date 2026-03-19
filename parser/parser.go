@@ -129,6 +129,12 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 						Errors: []string{fmt.Sprintf("GroupSeqNo: invalid integer format %q", s)},
 					})
 					continue
+				} else if v <= 0 {
+					parseErrs = append(parseErrs, ParseError{
+						Row:    rowNum,
+						Errors: []string{fmt.Sprintf("GroupSeqNo: must be positive (got %d)", v)},
+					})
+					continue
 				} else {
 					groupSeqNo = v
 				}
@@ -172,6 +178,8 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 
 // buildRegister constructs and validates a Register from a CSV row map.
 // It returns the Register and a slice of all formatting/validation errors.
+// Each validation step ensures the data conforms to the Modbus protocol
+// and internal system requirements.
 func buildRegister(row map[string]string, seenNames map[string]bool) (model.Register, []string) {
 	var errs []string
 
@@ -231,6 +239,7 @@ func buildRegister(row map[string]string, seenNames map[string]bool) (model.Regi
 		if v, err := strconv.Atoi(s); err != nil {
 			errs = append(errs, fmt.Sprintf("AddressStart: invalid integer format %q", s))
 		} else if v < 0 || v > 65535 {
+			// Modbus registers are identified by 16-bit addresses.
 			errs = append(errs, "AddressStart: must be between 0 and 65535")
 		} else {
 			addrStart = v
@@ -312,9 +321,9 @@ func buildRegister(row map[string]string, seenNames map[string]bool) (model.Regi
 	if s := row["wordorder"]; s != "" {
 		if v, err := strconv.Atoi(s); err != nil {
 			errs = append(errs, fmt.Sprintf("WordOrder: invalid integer format %q", s))
-		} else if v <= 0 || v >= int(model.WordOrderMax) {
+		} else if v < 0 || v >= int(model.WordOrderMax) {
 			errs = append(errs, fmt.Sprintf("WordOrder: invalid value %d (valid: 1–%d)", v, int(model.WordOrderMax)-1))
-		} else if length != 2 {
+		} else if v > 0 && length != 2 {
 			errs = append(errs, fmt.Sprintf("WordOrder: only for Length=2, but Length is %d", length))
 		} else {
 			wordOrder = v
@@ -326,7 +335,7 @@ func buildRegister(row map[string]string, seenNames map[string]bool) (model.Regi
 	if s := row["byteorder"]; s != "" {
 		if v, err := strconv.Atoi(s); err != nil {
 			errs = append(errs, fmt.Sprintf("ByteOrder: invalid integer format %q", s))
-		} else if v <= 0 || v >= int(model.ByteOrderMax) {
+		} else if v < 0 || v >= int(model.ByteOrderMax) {
 			errs = append(errs, fmt.Sprintf("ByteOrder: invalid value %d (valid: 1–%d)", v, int(model.ByteOrderMax)-1))
 		} else {
 			byteOrder = v
@@ -334,6 +343,7 @@ func buildRegister(row map[string]string, seenNames map[string]bool) (model.Regi
 	}
 
 	// 14. Logic - 32-bit DataType Length check
+	// 32-bit Modbus values (e.g. Float32, Int32) MUST occupy exactly two 16-bit registers.
 	if model.Is32BitDataType(model.RegisterDataType(dataType)) && length != 2 {
 		errs = append(errs, fmt.Sprintf("DataType: %d is 32-bit, but Length is %d (must be 2)", dataType, length))
 	}
