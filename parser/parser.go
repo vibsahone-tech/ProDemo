@@ -5,6 +5,7 @@ import (
 	"encoding/csv"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -15,9 +16,27 @@ import (
 
 // ParseError describes validation failures for a single CSV data row.
 type ParseError struct {
-	Row    int      `json:"row"`    // 1-based data row number (excluding header)
-	Errors []string `json:"errors"` // list of error messages for this row
+	Row    int      `json:"row"`
+	Errors []string `json:"errors"`
 }
+
+// ── Compiled Regexes (once at startup) ─────────────────────────────────────
+
+var (
+	// "0=Off" or "1=On Standby" — label cannot contain = or ;
+	enumItemRegex = regexp.MustCompile(`^(\d+)=([^;=]+)$`)
+
+	// "0=Alarm:critical" or "1=Info" — severity is optional
+	bitMapItemRegex = regexp.MustCompile(`^(\d+)=([^|=:]+)(?::(info|warning|critical))?$`)
+
+	// "min=10" or "max=-5.5" or "step=0.1"
+	constraintItemRegex = regexp.MustCompile(`^(?i)(min|max|step)=(-?\d+(?:\.\d+)?)$`)
+
+	// "1:true" or "-5:false"
+	executionRegex = regexp.MustCompile(`^(-?\d+):(true|false)$`)
+)
+
+// ── ParseCSV ────────────────────────────────────────────────────────────────
 
 // ParseCSV parses and validates a CSV byte slice.
 //
@@ -48,7 +67,7 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 	var registers []model.Register
 	var parseErrs []ParseError
 
-	seenNames := make(map[string]bool) // for uniqueness check across all rows
+	seenNames := make(map[string]bool)
 	rowNum := 0
 
 	for {
@@ -61,7 +80,6 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 		}
 		rowNum++
 
-		// Enforce max data rows.
 		if maxRows > 0 && rowNum > maxRows {
 			return nil, nil, nil, fmt.Errorf("CSV exceeds maximum allowed data rows (%d)", maxRows)
 		}
@@ -69,12 +87,11 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 		record := buildRowMap(headers, row)
 		reg, fmtErrs := buildRegister(record)
 
-		// Merge format-parse errors with field-level validation errors.
 		validErrs := validateRegister(rowNum, reg, seenNames)
 		allErrs := append(fmtErrs, validErrs...)
 		if len(allErrs) > 0 {
 			parseErrs = append(parseErrs, ParseError{Row: rowNum, Errors: allErrs})
-			continue // skip invalid rows
+			continue
 		}
 
 		registers = append(registers, reg)
@@ -86,14 +103,17 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 			if g, ok := groupMap[normalizedGroupName]; ok {
 				if g.SeqNo != groupSeqNo {
 					parseErrs = append(parseErrs, ParseError{
-						Row:    rowNum,
-						Errors: []string{fmt.Sprintf("GroupName: consistency error; group %q (case-insensitive) already exists with SeqNo %d, but this row has %d", groupName, g.SeqNo, groupSeqNo)},
+						Row: rowNum,
+						Errors: []string{fmt.Sprintf(
+							"GroupName: consistency error; group %q already exists with SeqNo %d, but this row has %d",
+							groupName, g.SeqNo, groupSeqNo,
+						)},
 					})
 					continue
 				}
 			} else {
 				groupMap[normalizedGroupName] = &model.RegisterGroup{
-					Name:  groupName, // Keep original case for the first occurrence
+					Name:  groupName,
 					SeqNo: groupSeqNo,
 				}
 			}
@@ -108,6 +128,8 @@ func ParseCSV(data []byte, maxRows int) ([]model.RegisterGroup, []model.Register
 
 	return groups, registers, parseErrs, nil
 }
+
+// ── buildRegister ───────────────────────────────────────────────────────────
 
 // buildRegister constructs a Register from a CSV row map.
 // It returns the Register and any format-level errors from complex field parsing.
@@ -127,10 +149,9 @@ func buildRegister(row map[string]string) (model.Register, []string) {
 		SubDataType:  model.RegisterSubType(atoi(row["SubDataType"])),
 		Scale:        atof(row["Scale"]),
 		Unit:         row["Unit"],
+		WordOrder:    model.WordOrder(atoi(row["WordOrder"])),
+		ByteOrder:    model.ByteOrder(atoi(row["ByteOrder"])),
 	}
-
-	reg.ByteOrder = model.ByteOrder(atoi(row["ByteOrder"]))
-	reg.WordOrder = model.WordOrder(atoi(row["WordOrder"]))
 
 	var fmtErrs []string
 
@@ -160,119 +181,124 @@ func buildRegister(row map[string]string) (model.Register, []string) {
 // ── Complex field parsers ───────────────────────────────────────────────────
 
 // parseEnumMap parses "value=label;value=label;..." into []EnumMapping.
-// Returns both the parsed result and any format errors encountered.
 func parseEnumMap(raw string) ([]model.EnumMapping, []string) {
 	const correctFormat = `correct format: "<int>=<label>;<int>=<label>;..." e.g. "0=Off;1=On;2=Standby"`
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
 	}
+
 	items := strings.Split(raw, ";")
 	result := make([]model.EnumMapping, 0, len(items))
+	seen := make(map[int]bool)
 	var errs []string
+
 	for _, item := range items {
 		item = strings.TrimSpace(item)
 		if item == "" {
 			continue
 		}
-		key, label, ok := strings.Cut(item, "=")
-		if !ok {
-			errs = append(errs, fmt.Sprintf(`EnumMap: item %q is missing "=" separator; %s`, item, correctFormat))
+		matches := enumItemRegex.FindStringSubmatch(item)
+		if matches == nil {
+			errs = append(errs, fmt.Sprintf(`EnumMap: invalid item %q; %s`, item, correctFormat))
 			continue
 		}
-		key = strings.TrimSpace(key)
-		label = strings.TrimSpace(label)
-		v, err := strconv.Atoi(key)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf(`EnumMap: value %q in item %q must be an integer; %s`, key, item, correctFormat))
+		v, _ := strconv.Atoi(matches[1])
+		label := strings.TrimSpace(matches[2])
+
+		if seen[v] {
+			errs = append(errs, fmt.Sprintf(`EnumMap: duplicate value %d found; %s`, v, correctFormat))
 			continue
 		}
-		if label == "" {
-			errs = append(errs, fmt.Sprintf(`EnumMap: label is empty for value %d; %s`, v, correctFormat))
-			continue
-		}
+		seen[v] = true
+
 		result = append(result, model.EnumMapping{Value: v, Label: label})
 	}
 	return result, errs
 }
 
 // parseBitMap parses "bit=label:severity|..." into []BitMapping.
-// Returns both the parsed result and any format errors encountered.
 func parseBitMap(raw string) ([]model.BitMapping, []string) {
 	const correctFormat = `correct format: "<bit>=<label>:<severity>|..." e.g. "0=Alarm:critical|1=Warning:warning|2=Info:info" (severity: info/warning/critical, optional)`
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
 	}
+
 	items := strings.Split(raw, "|")
 	result := make([]model.BitMapping, 0, len(items))
+	seen := make(map[int]bool)
 	var errs []string
+
 	for _, item := range items {
 		item = strings.TrimSpace(item)
 		if item == "" {
 			continue
 		}
-		bitStr, rest, ok := strings.Cut(item, "=")
-		if !ok {
-			errs = append(errs, fmt.Sprintf(`BitMap: item %q is missing "=" separator; %s`, item, correctFormat))
+		matches := bitMapItemRegex.FindStringSubmatch(item)
+		if matches == nil {
+			errs = append(errs, fmt.Sprintf(`BitMap: invalid item %q; %s`, item, correctFormat))
 			continue
 		}
-		bitStr = strings.TrimSpace(bitStr)
-		bit, err := strconv.Atoi(bitStr)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf(`BitMap: bit position %q in item %q must be an integer; %s`, bitStr, item, correctFormat))
+		bit, _ := strconv.Atoi(matches[1])
+		label := strings.TrimSpace(matches[2])
+		severityRaw := strings.ToLower(strings.TrimSpace(matches[3]))
+
+		if seen[bit] {
+			errs = append(errs, fmt.Sprintf(`BitMap: duplicate bit position %d found; %s`, bit, correctFormat))
 			continue
 		}
-		m := model.BitMapping{Bit: bit}
-		label, severity, hasSeverity := strings.Cut(rest, ":")
-		m.Label = strings.TrimSpace(label)
-		if m.Label == "" {
-			errs = append(errs, fmt.Sprintf(`BitMap: label is empty for bit %d; %s`, bit, correctFormat))
-			continue
+		seen[bit] = true
+
+		m := model.BitMapping{
+			Bit:   bit,
+			Label: label,
 		}
-		if hasSeverity {
-			sev := strings.ToLower(strings.TrimSpace(severity))
-			switch sev {
-			case "info":
-				m.Severity = model.BitSeverityInfo
-			case "warning":
-				m.Severity = model.BitSeverityWarning
-			case "critical":
-				m.Severity = model.BitSeverityCritical
-			default:
-				errs = append(errs, fmt.Sprintf(`BitMap: unknown severity %q for bit %d (valid: info/warning/critical); %s`, sev, bit, correctFormat))
-				continue
-			}
+		switch severityRaw {
+		case "info":
+			m.Severity = model.BitSeverityInfo
+		case "warning":
+			m.Severity = model.BitSeverityWarning
+		case "critical":
+			m.Severity = model.BitSeverityCritical
 		}
+
 		result = append(result, m)
 	}
 	return result, errs
 }
 
 // parseConstraints parses "min=N;max=N;step=N" into Constraints.
-// Returns both the parsed result and any format errors encountered.
 func parseConstraints(raw string) (model.Constraints, []string) {
 	const correctFormat = `correct format: "min=<number>;max=<number>;step=<number>" e.g. "min=0;max=100;step=1"`
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return model.Constraints{}, nil
 	}
+
 	var c model.Constraints
+	seen := make(map[string]bool)
 	var errs []string
+
 	for _, item := range strings.Split(raw, ";") {
 		item = strings.TrimSpace(item)
 		if item == "" {
 			continue
 		}
-		key, valStr, ok := strings.Cut(item, "=")
-		if !ok {
-			errs = append(errs, fmt.Sprintf(`Constraints: item %q is missing "=" separator; %s`, item, correctFormat))
+		matches := constraintItemRegex.FindStringSubmatch(item)
+		if matches == nil {
+			errs = append(errs, fmt.Sprintf(`Constraints: invalid item %q; %s`, item, correctFormat))
 			continue
 		}
-		key = strings.ToLower(strings.TrimSpace(key))
-		valStr = strings.TrimSpace(valStr)
-		val, err := strconv.ParseFloat(valStr, 64)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf(`Constraints: value %q for key %q must be a number; %s`, valStr, key, correctFormat))
+		key := strings.ToLower(matches[1])
+		val, _ := strconv.ParseFloat(matches[2], 64)
+
+		if seen[key] {
+			errs = append(errs, fmt.Sprintf(`Constraints: duplicate key %q found; %s`, key, correctFormat))
 			continue
 		}
+		seen[key] = true
+
 		switch key {
 		case "min":
 			c.Min = val
@@ -280,42 +306,32 @@ func parseConstraints(raw string) (model.Constraints, []string) {
 			c.Max = val
 		case "step":
 			c.Step = val
-		default:
-			errs = append(errs, fmt.Sprintf(`Constraints: unknown key %q (valid keys: min/max/step); %s`, key, correctFormat))
 		}
 	}
 	return c, errs
 }
 
 // parseExecution parses "triggerValue:autoReset" (e.g. "1:true") into ExecutionConfig.
-// Returns both the parsed result and any format errors encountered.
 func parseExecution(raw string) (model.ExecutionConfig, []string) {
 	const correctFormat = `correct format: "<int>:<bool>" e.g. "1:true" or "1:false"`
+	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return model.ExecutionConfig{}, nil
 	}
-	valStr, resetStr, ok := strings.Cut(raw, ":")
-	if !ok {
+
+	matches := executionRegex.FindStringSubmatch(raw)
+	if matches == nil {
 		return model.ExecutionConfig{}, []string{
-			fmt.Sprintf(`Execution: %q is missing ":" separator; %s`, raw, correctFormat),
+			fmt.Sprintf(`Execution: invalid format %q; %s`, raw, correctFormat),
 		}
 	}
-	valStr = strings.TrimSpace(valStr)
-	resetStr = strings.TrimSpace(resetStr)
-	val, err := strconv.Atoi(valStr)
-	if err != nil {
-		return model.ExecutionConfig{}, []string{
-			fmt.Sprintf(`Execution: trigger value %q must be an integer; %s`, valStr, correctFormat),
-		}
-	}
-	if resetStr != "true" && resetStr != "false" {
-		return model.ExecutionConfig{}, []string{
-			fmt.Sprintf(`Execution: autoReset %q must be "true" or "false"; %s`, resetStr, correctFormat),
-		}
-	}
+
+	val, _ := strconv.Atoi(matches[1])
+	autoReset := matches[2] == "true"
+
 	return model.ExecutionConfig{
 		TriggerValue: val,
-		AutoReset:    resetStr == "true",
+		AutoReset:    autoReset,
 	}, nil
 }
 
@@ -331,7 +347,7 @@ func normalizeHeaders(h []string) {
 }
 
 // buildRowMap zips headers and row values into a map. Missing cells default to "".
-func buildRowMap(headers, row []string) map[string]string {
+func buildRowMap(headers []string, row []string) map[string]string {
 	record := make(map[string]string, len(headers))
 	for i, h := range headers {
 		if i < len(row) {

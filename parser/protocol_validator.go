@@ -34,35 +34,52 @@ func ParseProtocolForm(r *http.Request) (model.Protocol, []string) {
 	}
 
 	baudRate := formInt(r, "baud_rate", true, &errs)
-	// Validate baudRate against allowed list from UI.
-	validateInList("baud_rate", baudRate, []int{1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200}, &errs)
+	validateInList("baud_rate", baudRate, []any{1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200}, &errs)
 
+	// Fix 1: Use explicit float64 literals so type matches formFloat return type.
 	stopBits := formFloat(r, "stop_bits", true, &errs)
-	validateInListFloat("stop_bits", stopBits, []float64{1, 1.5, 2}, &errs)
+	validateInList("stop_bits", stopBits, []any{1.0, 1.5, 2.0}, &errs)
 
 	dataBits := formInt(r, "data_bits", true, &errs)
-	validateInList("data_bits", dataBits, []int{5, 6, 7, 8}, &errs)
+	validateInList("data_bits", dataBits, []any{5, 6, 7, 8}, &errs)
 
 	parity := formInt(r, "parity", true, &errs)
-	readRegCode := normalizeHexCode(r.FormValue("read_register_code"))
+	// Validate parity enum.
+	validateEnum("parity", parity, int(model.ParityMax), true, &errs)
+	readRegCode := strings.TrimSpace(r.FormValue("read_register_code"))
 	if readRegCode == "" {
 		errs = append(errs, "read_register_code: mandatory field is missing")
 	} else {
-		validateInListStr("read_register_code", readRegCode, []string{"0x02", "0x03", "0x04", "0x05", "0x03, 0x04"}, &errs)
+		validateInList("read_register_code", readRegCode, []any{
+			"0x02", "0x03", "0x04", "0x05", "0x03, 0x04",
+		}, &errs)
 	}
 
-	writeRegCode := normalizeHexCode(r.FormValue("write_register_code"))
+	writeRegCode := strings.TrimSpace(r.FormValue("write_register_code"))
 	if writeRegCode == "" {
 		errs = append(errs, "write_register_code: mandatory field is missing")
 	} else {
-		validateInListStr("write_register_code", writeRegCode, []string{"0x06", "0x10"}, &errs)
+		validateInList("write_register_code", writeRegCode, []any{
+			"0x06",
+		}, &errs)
 	}
 
 	writeMultiRegCode := strings.TrimSpace(r.FormValue("write_multiple_register_code"))
+	if writeMultiRegCode == "" {
+		errs = append(errs, "write_multiple_register_code: mandatory field is missing")
+	} else {
+		validateInList("write_multiple_register_code", writeMultiRegCode, []any{
+			"0x10",
+		}, &errs)
+	}
 	commErrCode := strings.TrimSpace(r.FormValue("comm_err_response_code"))
-
-	// Validate parity enum.
-	validateEnum("parity", parity, int(model.ParityMax), true, &errs)
+	if commErrCode == "" {
+		errs = append(errs, "comm_err_response_code: mandatory field is missing")
+	} else {
+		validateInList("comm_err_response_code", commErrCode, []any{
+			"0x83",
+		}, &errs)
+	}
 
 	// Parse error_codes: key-value pairs sent as "code=label" separated by ";".
 	// e.g. "1=Illegal Function;2=Illegal Data Address;3=Illegal Data Value"
@@ -90,8 +107,6 @@ func ParseProtocolForm(r *http.Request) (model.Protocol, []string) {
 }
 
 // parseErrorCodes parses "code=label;code=label;..." into []ErrorCode.
-// It also returns a list of validation errors for any malformed items,
-// telling the caller what went wrong and showing the expected format.
 func parseErrorCodes(raw string) ([]model.ErrorCode, []string) {
 	const correctFormat = `correct format: "<int>=<label>;<int>=<label>;..." e.g. "1=Illegal Function;2=Illegal Data Address;3=Illegal Data Value"`
 	raw = strings.TrimSpace(raw)
@@ -173,7 +188,7 @@ func formFloat(r *http.Request, field string, mandatory bool, errs *[]string) fl
 	return v
 }
 
-// hasError returns true if field has an error already.
+// hasError returns true if field already has an error.
 func hasError(errs []string, field string) bool {
 	prefix := field + ":"
 	for _, e := range errs {
@@ -184,8 +199,8 @@ func hasError(errs []string, field string) bool {
 	return false
 }
 
-// validateInList checks if an integer value is within a permitted set.
-func validateInList(field string, val int, allowed []int, errs *[]string) {
+// Fix 3: Changed %d → %v so any type (int, float64, string) formats correctly.
+func validateInList(field string, val any, allowed []any, errs *[]string) {
 	if hasError(*errs, field) {
 		return
 	}
@@ -194,7 +209,7 @@ func validateInList(field string, val int, allowed []int, errs *[]string) {
 			return
 		}
 	}
-	*errs = append(*errs, fmt.Sprintf("%s: invalid value %d", field, val))
+	*errs = append(*errs, fmt.Sprintf("%s: invalid value %v", field, val))
 }
 
 // validateInListFloat checks if a float64 value is within a permitted set.
@@ -208,31 +223,4 @@ func validateInListFloat(field string, val float64, allowed []float64, errs *[]s
 		}
 	}
 	*errs = append(*errs, fmt.Sprintf("%s: invalid value %g", field, val))
-}
-
-// validateInListStr checks if a string value is within a permitted set.
-func validateInListStr(field string, val string, allowed []string, errs *[]string) {
-	if hasError(*errs, field) {
-		return
-	}
-	for _, a := range allowed {
-		if val == a {
-			return
-		}
-	}
-	*errs = append(*errs, fmt.Sprintf("%s: invalid value %q", field, val))
-}
-
-// normalizeHexCode pads decimal strings with 0x and a zero-prefix if necessary.
-// e.g., "3" -> "0x03", "03" -> "0x03", "0x03" -> "0x03".
-func normalizeHexCode(s string) string {
-	s = strings.TrimSpace(s)
-	if s == "" || strings.HasPrefix(s, "0x") {
-		return s
-	}
-	// Try parsing as integer (decimal or hex WITHOUT 0x prefix)
-	if v, err := strconv.Atoi(s); err == nil {
-		return fmt.Sprintf("0x%02x", v)
-	}
-	return s
 }

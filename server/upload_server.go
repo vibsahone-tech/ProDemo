@@ -77,7 +77,7 @@ func uploadCSV(w http.ResponseWriter, r *http.Request) {
 
 	// Read all form data into memory at once, up to the configured limit.
 	if err := r.ParseMultipartForm(maxBytes); err != nil {
-		writeJSON(w, http.StatusBadRequest, uploadResponse{Message: "upload size exceeds limit or malformed: " + err.Error()})
+		writeJSON(w, http.StatusBadRequest, uploadResponse{Message: "upload size exceeds limit: " + err.Error()})
 		return
 	}
 
@@ -107,6 +107,7 @@ func uploadCSV(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, uploadResponse{Message: "failed to read file: " + err.Error()})
 		return
 	}
+	log.Printf("Uploaded file size: %d bytes\n", len(data))
 
 	groups, registers, parseErrs, err := parser.ParseCSV(data, cfg.Upload.MaxRows)
 	if err != nil {
