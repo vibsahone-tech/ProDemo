@@ -6,7 +6,6 @@ import (
 	"os"
 )
 
-// Config mirrors the structure of config.json.
 type Config struct {
 	DataStore DataStoreConfig `json:"DataStore"`
 	Server    ServerConfig    `json:"Server"`

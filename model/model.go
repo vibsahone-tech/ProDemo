@@ -6,7 +6,7 @@ import (
 	"go.mongodb.org/mongo-driver/v2/bson"
 )
 
-// ── Document structs ────────────────────────────────────────────────────────
+// Document structs
 
 // Register is the primary Modbus register definition stored in MongoDB.
 type Register struct {
@@ -38,7 +38,7 @@ type RegisterGroup struct {
 	RegisterIds []bson.ObjectID `bson:"register_ids,omitempty"` // The associated register._id values.
 }
 
-// ── Supporting structs ──────────────────────────────────────────────────────
+// Supporting structs
 
 // EnumMapping maps a raw register integer value to a human-readable label.
 type EnumMapping struct {
@@ -66,7 +66,7 @@ type ExecutionConfig struct {
 	AutoReset    bool `bson:"auto_reset"`    // Whether the register auto-resets after execution.
 }
 
-// ── Enum types & constants ───────────────────────────────────────────────────
+// Enum types & constants
 
 // RegisterAccessType defines the allowed operation on a register (read, write, or both).
 type RegisterAccessType int
@@ -160,7 +160,7 @@ const (
 	ByteOrderMax                               // Sentinel value
 )
 
-// ── Helper predicates ───────────────────────────────────────────────────────
+// Helper predicates
 
 func (c Constraints) IsZero() bool {
 	return c.Min == 0 && c.Max == 0 && c.Step == 0
@@ -182,7 +182,7 @@ func Is32BitDataType(dt RegisterDataType) bool {
 	return dt == RegDataTypeUInt32 || dt == RegDataTypeInt32 || dt == RegDataTypeFloat32
 }
 
-// ── Protocol & Communication structs ────────────────────────────────────────
+// Protocol & Communication structs
 
 type Parity int
 
@@ -221,8 +221,8 @@ type Protocol struct {
 type Communication struct {
 	BaudRate int     `bson:"baud_rate"` // Communication speed.
 	StopBits float64 `bson:"stop_bits"` // Number of stop bits (1, 1.5, or 2).
-	DataBits int    `bson:"data_bits"` // Number of data bits.
-	Parity   Parity `bson:"parity"`    // Parity mode.
+	DataBits int     `bson:"data_bits"` // Number of data bits.
+	Parity   Parity  `bson:"parity"`    // Parity mode.
 }
 
 // Represents the error code for the documents.

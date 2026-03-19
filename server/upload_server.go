@@ -24,14 +24,12 @@ var (
 
 // uploadResponse is the JSON body returned for every upload request.
 type uploadResponse struct {
-	Message     string              `json:"message"`
-	Inserted    int                 `json:"inserted"`
-	Skipped     int                 `json:"skipped"`
-	Groups      int                 `json:"groups"`
-	ProtocolID  string              `json:"protocol_id,omitempty"`
-	TotalTimeMs int64               `json:"total_time_ms"`
-	DBTimeMs    int64               `json:"db_time_ms"`
-	Errors      []parser.ParseError `json:"errors,omitempty"`
+	Message    string              `json:"message"`
+	Inserted   int                 `json:"inserted"`
+	Skipped    int                 `json:"skipped"`
+	Groups     int                 `json:"groups"`
+	ProtocolID string              `json:"protocol_id,omitempty"`
+	Errors     []parser.ParseError `json:"errors,omitempty"`
 }
 
 // protocolErrorResponse is returned when protocol form-data validation fails.
@@ -72,19 +70,19 @@ func uploadCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	maxBytes := int64(cfg.Server.MaxUploadSizeMB) << 20
-	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	// Calculate the max upload limit (e.g., 1MB) in bytes.
+	maxUploadBytes := int64(cfg.Server.MaxUploadSizeMB) * 1024 * 1024
+
+	// Limit the request body size at the network level to prevent resource exhaustion.
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadBytes)
 
 	// Read all form data into memory at once, up to the configured limit.
-	if err := r.ParseMultipartForm(maxBytes); err != nil {
+	if err := r.ParseMultipartForm(maxUploadBytes); err != nil {
 		writeJSON(w, http.StatusBadRequest, uploadResponse{Message: "upload size exceeds limit: " + err.Error()})
 		return
 	}
 
-	// ── Step 0: Start timer ───────────────────────────────────────────
-	startTime := time.Now()
-
-	// ── Step 1: Validate protocol form-data first ───────────────────────
+	// Step 1: Validate protocol form-data first
 	proto, protoErrs := parser.ParseProtocolForm(r)
 	if len(protoErrs) > 0 {
 		writeJSON(w, http.StatusUnprocessableEntity, protocolErrorResponse{
@@ -94,7 +92,7 @@ func uploadCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Step 2: Read and parse the register CSV file ────────────────────
+	// Step 2: Read and parse the register CSV file
 	file, _, err := r.FormFile("file")
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, uploadResponse{Message: "file upload error: " + err.Error()})
@@ -125,10 +123,10 @@ func uploadCSV(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Step 3: Attach groups to protocol ───────────────────────────────
+	// Step 3: Attach groups to protocol
 	proto.RegisterGroups = groups
 
-	// Hardcode AuditInfo for this demo.
+	// Attach basic AuditInfo for tracking
 	now := time.Now()
 	demoUserID := bson.NewObjectID()
 	proto.AuditInfo = model.AuditInfo{
@@ -138,29 +136,21 @@ func uploadCSV(w http.ResponseWriter, r *http.Request) {
 		UpdatedAt: now,
 	}
 
-	// ── Step 4: Execute transaction ─────────────────────────────────────
-	dbStartTime := time.Now()
-	insertErr := insertProtocolAndRegisters(r.Context(), proto, registers)
-	dbDuration := time.Since(dbStartTime)
-
-	if insertErr != nil {
+	// Step 4: Save protocol and all registers in a single transaction
+	if err := insertProtocolAndRegisters(r.Context(), proto, registers); err != nil {
 		writeJSON(w, http.StatusInternalServerError, uploadResponse{
-			Message:     "DB transaction failed: " + insertErr.Error(),
-			Inserted:    0,
-			Skipped:     0,
-			TotalTimeMs: time.Since(startTime).Milliseconds(),
-			DBTimeMs:    dbDuration.Milliseconds(),
+			Message:  "DB transaction failed: " + err.Error(),
+			Inserted: 0,
+			Skipped:  0,
 		})
 		return
 	}
 
 	writeJSON(w, http.StatusOK, uploadResponse{
-		Message:     "upload successful: protocol and registers inserted atomically",
-		Inserted:    len(registers),
-		Groups:      len(groups),
-		ProtocolID:  proto.ID.Hex(),
-		TotalTimeMs: time.Since(startTime).Milliseconds(),
-		DBTimeMs:    dbDuration.Milliseconds(),
+		Message:    "upload successful: protocol and registers inserted atomically",
+		Inserted:   len(registers),
+		Groups:     len(groups),
+		ProtocolID: proto.ID.Hex(),
 	})
 }
 
@@ -210,5 +200,7 @@ func insertProtocolAndRegisters(ctx context.Context, proto model.Protocol, regis
 func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(body)
+	if err := json.NewEncoder(w).Encode(body); err != nil {
+		log.Printf("writeJSON: failed to encode response: %v", err)
+	}
 }

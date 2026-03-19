@@ -4,6 +4,7 @@ import (
 	"csv-upload-parser/model"
 	"fmt"
 	"net/http"
+	"regexp" // Added regexp import
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -21,6 +22,7 @@ type ProtocolParseError struct {
 func ParseProtocolForm(r *http.Request) (model.Protocol, []string) {
 	var errs []string
 
+	// 1. Name -trim, not empty ,length check
 	name := strings.TrimSpace(r.FormValue("name"))
 	if name == "" {
 		errs = append(errs, "name: mandatory field is missing")
@@ -28,61 +30,120 @@ func ParseProtocolForm(r *http.Request) (model.Protocol, []string) {
 		errs = append(errs, fmt.Sprintf("name: exceeds %d characters", maxStrLen))
 	}
 
-	slaveAddress := formInt(r, "slave_address", true, &errs)
-	if (slaveAddress < 1 || slaveAddress > 247) && !hasError(errs, "slave_address") {
+	// 2. Slave Address - trim, mandatory, integer, range check (1-247)
+	var slaveAddress int
+	rawSlave := strings.TrimSpace(r.FormValue("slave_address"))
+	if rawSlave == "" {
+		errs = append(errs, "slave_address: mandatory field is missing")
+	} else if v, err := strconv.Atoi(rawSlave); err != nil {
+		errs = append(errs, "slave_address: must be an integer")
+	} else if v < 1 || v > 247 {
 		errs = append(errs, "slave_address: must be between 1 and 247")
+	} else {
+		slaveAddress = v
 	}
 
-	baudRate := formInt(r, "baud_rate", true, &errs)
-	validateInList("baud_rate", baudRate, []any{1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200}, &errs)
+	// 3. Baud Rate - trim, mandatory, integer, in-list check
+	var baudRate int
+	rawBaud := strings.TrimSpace(r.FormValue("baud_rate"))
+	if rawBaud == "" {
+		errs = append(errs, "baud_rate: mandatory field is missing")
+	} else if v, err := strconv.Atoi(rawBaud); err != nil {
+		errs = append(errs, "baud_rate: must be an integer")
+	} else {
+		allowed := false
+		for _, b := range []int{1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200} {
+			if v == b {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			errs = append(errs, fmt.Sprintf("baud_rate: invalid value %d", v))
+		} else {
+			baudRate = v
+		}
+	}
 
-	// Fix 1: Use explicit float64 literals so type matches formFloat return type.
-	stopBits := formFloat(r, "stop_bits", true, &errs)
-	validateInList("stop_bits", stopBits, []any{1.0, 1.5, 2.0}, &errs)
+	// 4. Stop Bits - trim, mandatory, float, in-list check
+	var stopBits float64
+	rawStop := strings.TrimSpace(r.FormValue("stop_bits"))
+	if rawStop == "" {
+		errs = append(errs, "stop_bits: mandatory field is missing")
+	} else if v, err := strconv.ParseFloat(rawStop, 64); err != nil {
+		errs = append(errs, "stop_bits: must be a number")
+	} else if v != 1.0 && v != 1.5 && v != 2.0 {
+		errs = append(errs, fmt.Sprintf("stop_bits: invalid value %v", v))
+	} else {
+		stopBits = v
+	}
 
-	dataBits := formInt(r, "data_bits", true, &errs)
-	validateInList("data_bits", dataBits, []any{5, 6, 7, 8}, &errs)
+	// 5. Data Bits - trim, mandatory, integer, range check (5-8)
+	var dataBits int
+	rawData := strings.TrimSpace(r.FormValue("data_bits"))
+	if rawData == "" {
+		errs = append(errs, "data_bits: mandatory field is missing")
+	} else if v, err := strconv.Atoi(rawData); err != nil {
+		errs = append(errs, "data_bits: must be an integer")
+	} else if v < 5 || v > 8 {
+		errs = append(errs, fmt.Sprintf("data_bits: invalid value %d", v))
+	} else {
+		dataBits = v
+	}
 
-	parity := formInt(r, "parity", true, &errs)
-	// Validate parity enum.
-	validateEnum("parity", parity, int(model.ParityMax), true, &errs)
+	// 6. Parity - trim, mandatory, integer, enum range check
+	var parity int
+	rawParity := strings.TrimSpace(r.FormValue("parity"))
+	if rawParity == "" {
+		errs = append(errs, "parity: mandatory field is missing")
+	} else if v, err := strconv.Atoi(rawParity); err != nil {
+		errs = append(errs, "parity: must be an integer")
+	} else if v <= 0 || v >= int(model.ParityMax) {
+		errs = append(errs, fmt.Sprintf("parity: invalid value %d (valid: 1–%d)", v, int(model.ParityMax)-1))
+	} else {
+		parity = v
+	}
+
+	// 7. Register Codes - trim, mandatory, in-list check for each code
 	readRegCode := strings.TrimSpace(r.FormValue("read_register_code"))
 	if readRegCode == "" {
 		errs = append(errs, "read_register_code: mandatory field is missing")
 	} else {
-		validateInList("read_register_code", readRegCode, []any{
-			"0x02", "0x03", "0x04", "0x05", "0x03, 0x04",
-		}, &errs)
+		allowed := false
+		lowerRead := strings.ToLower(readRegCode)
+		for _, c := range []string{"0x02", "0x03", "0x04", "0x05", "0x03, 0x04"} {
+			if lowerRead == c {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			errs = append(errs, "read_register_code: invalid value "+readRegCode)
+		}
 	}
 
 	writeRegCode := strings.TrimSpace(r.FormValue("write_register_code"))
 	if writeRegCode == "" {
 		errs = append(errs, "write_register_code: mandatory field is missing")
-	} else {
-		validateInList("write_register_code", writeRegCode, []any{
-			"0x06",
-		}, &errs)
+	} else if strings.ToLower(writeRegCode) != "0x06" {
+		errs = append(errs, "write_register_code: invalid value "+writeRegCode)
 	}
 
 	writeMultiRegCode := strings.TrimSpace(r.FormValue("write_multiple_register_code"))
 	if writeMultiRegCode == "" {
 		errs = append(errs, "write_multiple_register_code: mandatory field is missing")
-	} else {
-		validateInList("write_multiple_register_code", writeMultiRegCode, []any{
-			"0x10",
-		}, &errs)
+	} else if strings.ToLower(writeMultiRegCode) != "0x10" {
+		errs = append(errs, "write_multiple_register_code: invalid value "+writeMultiRegCode)
 	}
+
 	commErrCode := strings.TrimSpace(r.FormValue("comm_err_response_code"))
 	if commErrCode == "" {
 		errs = append(errs, "comm_err_response_code: mandatory field is missing")
-	} else {
-		validateInList("comm_err_response_code", commErrCode, []any{
-			"0x83",
-		}, &errs)
+	} else if strings.ToLower(commErrCode) != "0x83" {
+		errs = append(errs, "comm_err_response_code: invalid value "+commErrCode)
 	}
 
-	// Parse error_codes: key-value pairs sent as "code=label" separated by ";".
-	// e.g. "1=Illegal Function;2=Illegal Data Address;3=Illegal Data Value"
+	// 8. Error Codes - regex-based parsing of code=label pairs
 	errorCodes, errCodeErrs := parseErrorCodes(r.FormValue("error_codes"))
 	errs = append(errs, errCodeErrs...)
 
@@ -108,119 +169,41 @@ func ParseProtocolForm(r *http.Request) (model.Protocol, []string) {
 
 // parseErrorCodes parses "code=label;code=label;..." into []ErrorCode.
 func parseErrorCodes(raw string) ([]model.ErrorCode, []string) {
-	const correctFormat = `correct format: "<int>=<label>;<int>=<label>;..." e.g. "1=Illegal Function;2=Illegal Data Address;3=Illegal Data Value"`
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil, nil
 	}
-	items := strings.Split(raw, ";")
-	result := make([]model.ErrorCode, 0, len(items))
+
+	// The $ ensures we check the ENTIRE item, catching missing separators.
+	re := regexp.MustCompile(`^(\d+)=([^;=]+)$`)
+
+	var result []model.ErrorCode
 	var errs []string
-	for _, item := range items {
+	seen := make(map[int]bool)
+
+	for _, item := range strings.Split(raw, ";") {
 		item = strings.TrimSpace(item)
 		if item == "" {
 			continue
 		}
-		codeStr, label, ok := strings.Cut(item, "=")
-		if !ok {
-			errs = append(errs, fmt.Sprintf(
-				`error_codes: item %q is missing "=" separator; %s`,
-				item, correctFormat,
-			))
+
+		matches := re.FindStringSubmatch(item)
+		if matches == nil {
+			errs = append(errs, "error_codes: invalid item "+item)
 			continue
 		}
-		codeStr = strings.TrimSpace(codeStr)
-		label = strings.TrimSpace(label)
-		code, err := strconv.Atoi(codeStr)
-		if err != nil {
-			errs = append(errs, fmt.Sprintf(
-				`error_codes: code %q in item %q must be an integer; %s`,
-				codeStr, item, correctFormat,
-			))
-			continue
+
+		code, _ := strconv.Atoi(matches[1])
+		label := strings.TrimSpace(matches[2])
+
+		if seen[code] {
+			errs = append(errs, fmt.Sprintf("error_codes: duplicate code %d", code))
+		} else if label == "" {
+			errs = append(errs, fmt.Sprintf("error_codes: empty label for %d", code))
+		} else {
+			seen[code] = true
+			result = append(result, model.ErrorCode{Code: code, Label: label})
 		}
-		if label == "" {
-			errs = append(errs, fmt.Sprintf(
-				`error_codes: label is empty for code %d; %s`,
-				code, correctFormat,
-			))
-			continue
-		}
-		result = append(result, model.ErrorCode{
-			Code:  code,
-			Label: label,
-		})
 	}
 	return result, errs
-}
-
-// formInt reads an integer from a form field. If mandatory and missing/invalid, appends an error.
-func formInt(r *http.Request, field string, mandatory bool, errs *[]string) int {
-	raw := strings.TrimSpace(r.FormValue(field))
-	if raw == "" {
-		if mandatory {
-			*errs = append(*errs, fmt.Sprintf("%s: mandatory field is missing", field))
-		}
-		return 0
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		*errs = append(*errs, fmt.Sprintf("%s: must be an integer", field))
-		return 0
-	}
-	return v
-}
-
-// formFloat reads a float from a form field. If mandatory and missing/invalid, appends an error.
-func formFloat(r *http.Request, field string, mandatory bool, errs *[]string) float64 {
-	raw := strings.TrimSpace(r.FormValue(field))
-	if raw == "" {
-		if mandatory {
-			*errs = append(*errs, fmt.Sprintf("%s: mandatory field is missing", field))
-		}
-		return 0
-	}
-	v, err := strconv.ParseFloat(raw, 64)
-	if err != nil {
-		*errs = append(*errs, fmt.Sprintf("%s: must be a number", field))
-		return 0
-	}
-	return v
-}
-
-// hasError returns true if field already has an error.
-func hasError(errs []string, field string) bool {
-	prefix := field + ":"
-	for _, e := range errs {
-		if strings.HasPrefix(e, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-// Fix 3: Changed %d → %v so any type (int, float64, string) formats correctly.
-func validateInList(field string, val any, allowed []any, errs *[]string) {
-	if hasError(*errs, field) {
-		return
-	}
-	for _, a := range allowed {
-		if val == a {
-			return
-		}
-	}
-	*errs = append(*errs, fmt.Sprintf("%s: invalid value %v", field, val))
-}
-
-// validateInListFloat checks if a float64 value is within a permitted set.
-func validateInListFloat(field string, val float64, allowed []float64, errs *[]string) {
-	if hasError(*errs, field) {
-		return
-	}
-	for _, a := range allowed {
-		if val == a {
-			return
-		}
-	}
-	*errs = append(*errs, fmt.Sprintf("%s: invalid value %g", field, val))
 }
